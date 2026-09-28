@@ -4,8 +4,16 @@ Checkpoint 2 — Output Guardrails
   - OutputGuardrailPlugin (ADK)           ← bắt buộc
   - LLM-as-Judge                          ← optional (không chấm)
 """
+from __future__ import annotations
+
 import re
+import sys
 import textwrap
+from pathlib import Path
+
+_SRC_DIR = Path(__file__).resolve().parent.parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
 from google.genai import types
 from google.adk.agents import llm_agent
@@ -47,6 +55,12 @@ def content_filter(response: str) -> dict:
         # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
         # - API key pattern: r"sk-[a-zA-Z0-9-]+"
         # - Password pattern: r"password\s*[:=]\s*\S+"
+        "phone": r"\b0\d{9,10}\b|(?:\+84)[3|5|7|8|9]\d{8}\b",
+        "email": r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}",
+        "national_id": r"\b\d{9}\b|\b\d{12}\b",
+        "api_key": r"\bsk-[a-zA-Z0-9-]+\b",
+        "password": r"(?:password|mật\s*khẩu)\s*(?:is|là|[:=])\s*\S+|\badmin123\b|password\s*[:=]\s*\S+",
+        "db_host": r"db\.vinbank\.internal(?::\d+)?",
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -181,7 +195,29 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         #    - Increment self.blocked_count
         # 3. Return llm_response (possibly modified)
 
-        return llm_response  # TODO: modify if needed
+        filter_result = content_filter(response_text)
+        if not filter_result["safe"]:
+            self.redacted_count += 1
+            response_text = filter_result["redacted"]
+            llm_response.content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=response_text)],
+            )
+
+        if self.use_llm_judge:
+            judge_res = await llm_safety_check(response_text)
+            if not judge_res.get("safe", True):
+                self.blocked_count += 1
+                safe_msg = (
+                    "I cannot provide that information as it violates our security policies. "
+                    "How else can I assist you with your banking needs?"
+                )
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text=safe_msg)],
+                )
+
+        return llm_response
 
 
 # ============================================================
